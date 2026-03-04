@@ -9,14 +9,17 @@ use App\Models\StockOut;
 
 class BuildExcelIvtFile extends Command
 {
-    protected $signature = 'app:build-excel-ivt-file';
+    protected $signature = 'app:build-excel-ivt-file {start_date?} {end_date?}';
 
-    protected $description = 'Build Excel IVT files from invoices and stock-outs';
+    protected $description = 'Build Excel IVT files from invoices and stock-outs by date range (YYYY-MM-DD)';
 
     private string $baseUrl = 'https://apiivt.ipos.vn';
 
     /** @var array<string, object> Recipes keyed by item_id */
     private array $recipes = [];
+
+    /** @var array<string, array<int>> Invoice numbers grouped by ky_hieu for summary TXT */
+    private array $kyHieuInvoices = [];
 
     /**
      * Unit conversion table per item_id.
@@ -60,18 +63,48 @@ class BuildExcelIvtFile extends Command
         $this->recipes = $this->loadRecipes();
         $this->info('Loaded ' . count($this->recipes) . ' recipe(s).');
 
-        // Step 2: Build Excel files per store
+        // Step 2: Determine date range
+        $startDate = $this->argument('start_date') ?: date('Y-m-d');
+        $endDate = $this->argument('end_date') ?: $startDate;
+
+        $this->info("Processing invoices from {$startDate} to {$endDate}");
+
+        try {
+            $period = new \DatePeriod(
+                new \DateTime($startDate),
+                new \DateInterval('P1D'),
+                (new \DateTime($endDate))->modify('+1 day')
+            );
+        } catch (\Exception $e) {
+            $this->error("Invalid date format. Please use YYYY-MM-DD.");
+            return self::FAILURE;
+        }
+
+        // Step 3: Build Excel files per store per day
         $stores = Invoice::select('store_uid')->groupBy('store_uid')->get();
 
-        foreach ($stores as $store) {
-            $this->info("Building Excel for store: {$store->store_uid}");
-            $this->buildExcelFile($store->store_uid);
+        foreach ($period as $dt) {
+            $date = $dt->format('Y-m-d');
+            $this->info("--- Processing date: {$date} ---");
+
+            foreach ($stores as $store) {
+                $this->buildExcelFile($store->store_uid, $date);
+            }
+        }
+
+        // Step 4: Write kyHieu summary txt files
+        $txtDir = storage_path('app/excel-ivt');
+        foreach ($this->kyHieuInvoices as $kyHieu => $invoiceNumbers) {
+            sort($invoiceNumbers);
+            $txtPath = $txtDir . '/Dem_hoa_don_thue_' . $kyHieu . '.txt';
+            file_put_contents($txtPath, implode(PHP_EOL, $invoiceNumbers) . PHP_EOL);
+            $this->info("Generated summary for prefix: {$kyHieu}");
         }
 
         return self::SUCCESS;
     }
 
-    public function buildExcelFile(string $storeUid): void
+    public function buildExcelFile(string $storeUid, string $date): void
     {
         $headers = [
             'ky_hieu',
@@ -85,78 +118,77 @@ class BuildExcelIvtFile extends Command
             'warehouse',
         ];
 
-        // Collect all rows grouped by filePath
+        $startMs = strtotime($date . ' 00:00:00') * 1000;
+        $endMs = strtotime($date . ' 23:59:59') * 1000 + 999;
+
+        // Collect all rows grouped by filePath for this specific day
         $fileRows = [];
-        $kyHieuInvoices = [];
 
-        Invoice::where('store_uid', $storeUid)
+        $dayInvoices = Invoice::where('store_uid', $storeUid)
+            ->whereBetween('vat_invoice_date', [$startMs, $endMs])
             ->orderBy('vat_invoice_number', 'asc')
-            ->chunk(100, function ($invoices) use (&$fileRows, &$kyHieuInvoices) {
-                $tranIds = $invoices->pluck('tran_id');
-                $stockOuts = StockOut::whereIn('tran_id', $tranIds)->get()->keyBy('tran_id');
+            ->get();
 
-                foreach ($invoices as $invoice) {
-                    $stockOut = $stockOuts->get($invoice->tran_id);
-                    $kyHieu = $this->getKyHieu($invoice);
-                    $kyHieuInvoices[$kyHieu][] = $invoice->vat_invoice_number;
-                    $filePath = storage_path(
-                        'app/excel-ivt/' . $kyHieu . '/' . ((int) ($invoice->vat_invoice_number / 100)) . '.xlsx'
-                    );
+        if ($dayInvoices->isEmpty()) {
+            return;
+        }
 
-                    if (! $stockOut || ! ($detail = json_decode($stockOut?->detail)) || empty($detail->list_item)) {
-                        $this->warn("StockOut/Detail not found for tran_id: {$invoice->tran_id}");
-                        $fileRows[$filePath][] = [
-                            $kyHieu,
-                            $invoice->vat_invoice_number,
-                            date('Y-m-d', $invoice->vat_invoice_date / 1000),
-                            $stockOut?->gi_id ?? '',
-                            'ONGNHUATO',
-                            'Lỗi phần mềm IVT',
-                            0,
-                            'ONG',
-                            $kyHieu,
-                        ];
-                        continue;
+        $this->info("  Store {$storeUid}: found " . $dayInvoices->count() . " invoices.");
+
+        $tranIds = $dayInvoices->pluck('tran_id');
+        $stockOuts = StockOut::whereIn('tran_id', $tranIds)->get()->keyBy('tran_id');
+
+        foreach ($dayInvoices as $invoice) {
+            $stockOut = $stockOuts->get($invoice->tran_id);
+            $kyHieu = $this->getKyHieu($invoice);
+            $this->kyHieuInvoices[$kyHieu][] = $invoice->vat_invoice_number;
+            
+            $filePath = storage_path(
+                'app/excel-ivt/' . $kyHieu . '/' . $date . '.xlsx'
+            );
+
+            if (! $stockOut || ! ($detail = json_decode($stockOut?->detail)) || empty($detail->list_item)) {
+                $this->warn("  Warning: StockOut/Detail not found for tran_id: {$invoice->tran_id}");
+                $fileRows[$filePath][] = [
+                    $kyHieu,
+                    $invoice->vat_invoice_number,
+                    $date,
+                    $stockOut?->gi_id ?? '',
+                    'ONGNHUATO',
+                    'Lỗi phần mềm IVT',
+                    0,
+                    'ONG',
+                    $kyHieu,
+                ];
+                continue;
+            }
+
+            foreach ($detail->list_item as $item) {
+                $nvls = $this->congThuc($item);
+
+                foreach ($nvls as $nvl) {
+                    if (empty($nvl->warehouse)) {
+                        $nvl->warehouse = $kyHieu;
                     }
-
-
-                    foreach ($detail->list_item as $item) {
-                        $nvls = $this->congThuc($item);
-
-                        foreach ($nvls as $nvl) {
-                            if (empty($nvl->warehouse)) {
-                                $nvl->warehouse = $kyHieu;
-                            }
-                            $fileRows[$filePath][] = [
-                                $kyHieu,
-                                $invoice->vat_invoice_number,
-                                date('Y-m-d', $invoice->vat_invoice_date / 1000),
-                                $stockOut->gi_id,
-                                $nvl->item_id,
-                                $nvl->item_name,
-                                $nvl->quantity,
-                                $nvl->unit_id,
-                                $nvl->warehouse
-                            ];
-                        }
-                    }
+                    $fileRows[$filePath][] = [
+                        $kyHieu,
+                        $invoice->vat_invoice_number,
+                        $date,
+                        $stockOut->gi_id,
+                        $nvl->item_id,
+                        $nvl->item_name,
+                        $nvl->quantity,
+                        $nvl->unit_id,
+                        $nvl->warehouse
+                    ];
                 }
-            });
+            }
+        }
 
         // Write each file once
         foreach ($fileRows as $filePath => $rows) {
             $this->writeToExcel($filePath, $headers, $rows);
         }
-
-        // Write kyHieu summary txt files
-        $txtDir = storage_path('app/excel-ivt');
-        foreach ($kyHieuInvoices as $kyHieu => $invoiceNumbers) {
-            sort($invoiceNumbers);
-            $txtPath = $txtDir . '/Dem_hoa_don_thue_' . $kyHieu . '.txt';
-            file_put_contents($txtPath, implode(PHP_EOL, $invoiceNumbers) . PHP_EOL);
-        }
-
-        $this->info('Done. Generated ' . count($fileRows) . ' Excel file(s) and ' . count($kyHieuInvoices) . ' txt file(s).');
     }
 
     /**
