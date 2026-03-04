@@ -3,9 +3,9 @@
 namespace App\Console\Commands;
 
 use App\Models\Invoice;
+use App\Models\StockOut;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Http;
-use App\Models\StockOut;
 
 class BuildExcelIvtFile extends Command
 {
@@ -22,6 +22,12 @@ class BuildExcelIvtFile extends Command
     private array $kyHieuInvoices = [];
 
     /**
+     * Monthly aggregation data.
+     * Format: [kyHieu][month][item_id] => ['item_name', 'quantity', 'unit_id', 'warehouse']
+     */
+    private array $monthlyAggregation = [];
+
+    /**
      * Unit conversion table per item_id.
      * Format: item_id => [from_unit_id, to_unit_id, ratio]
      * ratio means: 1 from_unit = ratio to_unit
@@ -29,14 +35,14 @@ class BuildExcelIvtFile extends Command
      */
     private array $unitConversions = [
         'COT_TRADAOCAMSA' => ['from' => 'COC', 'to' => 'ML', 'ratio' => 200],
-        'TP_KEMMAN'       => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 40],
-        'TP_THACHDAUNHO'  => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 70],
-        'TP_THACHTHAIDO'  => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 70],
-        'TP_TRANCHAUDEN'  => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 80],
-        'TP_TRANCHAUDUONGDEN'  => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 80],
-        'TP_THACHTRADAO'  => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 70],
-        'TP_THACHTHAIXANH'  => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 70],
-        'TP_SOTCARAMEL'  => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 30],
+        'TP_KEMMAN' => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 40],
+        'TP_THACHDAUNHO' => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 70],
+        'TP_THACHTHAIDO' => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 70],
+        'TP_TRANCHAUDEN' => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 80],
+        'TP_TRANCHAUDUONGDEN' => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 80],
+        'TP_THACHTRADAO' => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 70],
+        'TP_THACHTHAIXANH' => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 70],
+        'TP_SOTCARAMEL' => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 30],
     ];
 
     private array $overwriteWarehouse = [
@@ -61,7 +67,7 @@ class BuildExcelIvtFile extends Command
         // Step 1: Load recipes
         $this->info('Loading recipes...');
         $this->recipes = $this->loadRecipes();
-        $this->info('Loaded ' . count($this->recipes) . ' recipe(s).');
+        $this->info('Loaded '.count($this->recipes).' recipe(s).');
 
         // Step 2: Determine date range
         $startDate = $this->argument('start_date') ?: date('Y-m-d');
@@ -76,7 +82,8 @@ class BuildExcelIvtFile extends Command
                 (new \DateTime($endDate))->modify('+1 day')
             );
         } catch (\Exception $e) {
-            $this->error("Invalid date format. Please use YYYY-MM-DD.");
+            $this->error('Invalid date format. Please use YYYY-MM-DD.');
+
             return self::FAILURE;
         }
 
@@ -96,9 +103,45 @@ class BuildExcelIvtFile extends Command
         $txtDir = storage_path('app/excel-ivt');
         foreach ($this->kyHieuInvoices as $kyHieu => $invoiceNumbers) {
             sort($invoiceNumbers);
-            $txtPath = $txtDir . '/Dem_hoa_don_thue_' . $kyHieu . '.txt';
-            file_put_contents($txtPath, implode(PHP_EOL, $invoiceNumbers) . PHP_EOL);
+            $txtPath = $txtDir.'/Dem_hoa_don_thue_'.$kyHieu.'.txt';
+            file_put_contents($txtPath, implode(PHP_EOL, $invoiceNumbers).PHP_EOL);
             $this->info("Generated summary for prefix: {$kyHieu}");
+        }
+
+        // Step 5: Write monthly aggregation Excel files
+        $this->info('Generating monthly summary Excel files...');
+        foreach ($this->monthlyAggregation as $kyHieu => $months) {
+            foreach ($months as $month => $items) {
+                $filePath = storage_path("app/excel-ivt/{$kyHieu}_tong_hop_{$month}.xlsx");
+
+                $rows = [];
+                foreach ($items as $itemId => $data) {
+                    $rows[] = [
+                        $kyHieu,
+                        '', // vat_invoice_number
+                        $month, // vat_invoice_date (as month)
+                        '', // gi_id
+                        $itemId,
+                        $data['item_name'],
+                        $data['quantity'],
+                        $data['unit_id'],
+                        $data['warehouse'],
+                    ];
+                }
+
+                $this->writeToExcel($filePath, [
+                    'ky_hieu',
+                    'vat_invoice_number',
+                    'vat_invoice_date',
+                    'gi_id',
+                    'item_id',
+                    'item_name',
+                    'quantity',
+                    'unit_id',
+                    'warehouse',
+                ], $rows);
+                $this->info("  Monthly summary generated: {$filePath}");
+            }
         }
 
         return self::SUCCESS;
@@ -118,8 +161,8 @@ class BuildExcelIvtFile extends Command
             'warehouse',
         ];
 
-        $startMs = strtotime($date . ' 00:00:00') * 1000;
-        $endMs = strtotime($date . ' 23:59:59') * 1000 + 999;
+        $startMs = strtotime($date.' 00:00:00') * 1000;
+        $endMs = strtotime($date.' 23:59:59') * 1000 + 999;
 
         // Collect all rows grouped by filePath for this specific day
         $fileRows = [];
@@ -133,7 +176,7 @@ class BuildExcelIvtFile extends Command
             return;
         }
 
-        $this->info("  Store {$storeUid}: found " . $dayInvoices->count() . " invoices.");
+        $this->info("  Store {$storeUid}: found ".$dayInvoices->count().' invoices.');
 
         $tranIds = $dayInvoices->pluck('tran_id');
         $stockOuts = StockOut::whereIn('tran_id', $tranIds)->get()->keyBy('tran_id');
@@ -142,9 +185,9 @@ class BuildExcelIvtFile extends Command
             $stockOut = $stockOuts->get($invoice->tran_id);
             $kyHieu = $this->getKyHieu($invoice);
             $this->kyHieuInvoices[$kyHieu][] = $invoice->vat_invoice_number;
-            
+
             $filePath = storage_path(
-                'app/excel-ivt/' . $kyHieu . '/' . $date . '.xlsx'
+                'app/excel-ivt/'.$kyHieu.'/'.$date.'.xlsx'
             );
 
             if (! $stockOut || ! ($detail = json_decode($stockOut?->detail)) || empty($detail->list_item)) {
@@ -160,6 +203,7 @@ class BuildExcelIvtFile extends Command
                     'ONG',
                     $kyHieu,
                 ];
+
                 continue;
             }
 
@@ -179,8 +223,30 @@ class BuildExcelIvtFile extends Command
                         $nvl->item_name,
                         $nvl->quantity,
                         $nvl->unit_id,
-                        $nvl->warehouse
+                        $nvl->warehouse,
                     ];
+
+                    // Aggregation per kyHieu and month (YYYY-MM)
+                    $month = date('Y-m', strtotime($date));
+                    if (! isset($this->monthlyAggregation[$kyHieu][$month][$nvl->item_id])) {
+                        $this->monthlyAggregation[$kyHieu][$month][$nvl->item_id] = [
+                            'item_name' => $nvl->item_name,
+                            'quantity' => 0,
+                            'unit_id' => $nvl->unit_id,
+                            'warehouse' => $nvl->warehouse,
+                        ];
+                    }
+
+                    // Check for unit consistency
+                    if ($this->monthlyAggregation[$kyHieu][$month][$nvl->item_id]['unit_id'] !== $nvl->unit_id) {
+                        $this->error("ALARM: Unit mismatch for item '{$nvl->item_id}' in prefix '{$kyHieu}', month '{$month}'!");
+                        $this->error('Existing unit: '.$this->monthlyAggregation[$kyHieu][$month][$nvl->item_id]['unit_id']);
+                        $this->error('New unit: '.$nvl->unit_id);
+                        $this->error('Stopping process immediately.');
+                        exit(1);
+                    }
+
+                    $this->monthlyAggregation[$kyHieu][$month][$nvl->item_id]['quantity'] += $nvl->quantity;
                 }
             }
         }
@@ -243,10 +309,10 @@ class BuildExcelIvtFile extends Command
 
         foreach ($recipe->recipe_details as $detail) {
             $materials[] = (object) [
-                'item_id'   => $detail->item_id,
+                'item_id' => $detail->item_id,
                 'item_name' => $detail->item_name,
-                'unit_id'   => $detail->unit_id,
-                'quantity'  => round($detail->quantity * $itemQuantity, 4),
+                'unit_id' => $detail->unit_id,
+                'quantity' => round($detail->quantity * $itemQuantity, 4),
                 'warehouse' => $item->warehouse,
             ];
         }
@@ -308,7 +374,7 @@ class BuildExcelIvtFile extends Command
                 $allRecipes[] = $item;
             }
 
-            $this->line("  Recipes page {$page}/{$totalPages} — " . count($response['data'] ?? []) . ' recipe(s).');
+            $this->line("  Recipes page {$page}/{$totalPages} — ".count($response['data'] ?? []).' recipe(s).');
             $page++;
         } while ($page <= $totalPages);
 
@@ -318,7 +384,7 @@ class BuildExcelIvtFile extends Command
             mkdir($cacheDir, 0755, true);
         }
         file_put_contents($cachePath, json_encode($allRecipes, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
-        $this->info('Recipes cached to ' . $cachePath);
+        $this->info('Recipes cached to '.$cachePath);
 
         // Index by item_id
         $recipes = [];
@@ -337,31 +403,31 @@ class BuildExcelIvtFile extends Command
     private function loginIvt(): ?string
     {
         $response = Http::withHeaders([
-            'Content-Type'                => 'application/json',
-            'Accept'                      => 'application/json, text/plain, */*',
-            'language'                    => 'vi',
-            'device-type'                 => 'WEB',
-            'x-timezone'                  => '7',
-            'access-token'                => env('IVT_ACCESS_TOKEN', 'QEEWXV5B27K8YRG8XXZ83KA6LZQAZY6DRD91'),
-            'device-id'                   => env('IVT_DEVICE_ID', '8ee500c7-e317-4407-b5b7-094ac9a03896'),
-            'device-app-version'          => '2.14.3',
-            'device-os-platform'          => 'Microsoft Windows',
-            'device-os-browser'           => 'Chrome',
-            'device-os-version'           => '145.0.0.0',
-            'device-os-name'              => 'Windows 10.0',
-            'secret-key'                  => '713528fac3057e1a7945806cbb366183',
-            'Referer'                     => 'https://ivt.ipos.vn/',
+            'Content-Type' => 'application/json',
+            'Accept' => 'application/json, text/plain, */*',
+            'language' => 'vi',
+            'device-type' => 'WEB',
+            'x-timezone' => '7',
+            'access-token' => env('IVT_ACCESS_TOKEN', 'QEEWXV5B27K8YRG8XXZ83KA6LZQAZY6DRD91'),
+            'device-id' => env('IVT_DEVICE_ID', '8ee500c7-e317-4407-b5b7-094ac9a03896'),
+            'device-app-version' => '2.14.3',
+            'device-os-platform' => 'Microsoft Windows',
+            'device-os-browser' => 'Chrome',
+            'device-os-version' => '145.0.0.0',
+            'device-os-name' => 'Windows 10.0',
+            'secret-key' => '713528fac3057e1a7945806cbb366183',
+            'Referer' => 'https://ivt.ipos.vn/',
             'Access-Control-Allow-Origin' => 'https://apiivt.ipos.vn',
         ])->post("{$this->baseUrl}/api/main/v1/auth/login", [
             'user_email' => env('IVT_EMAIL'),
-            'password'   => env('IVT_PASSWORD'),
+            'password' => env('IVT_PASSWORD'),
         ]);
 
         if ($response->successful()) {
             return $response->json('data.user_token');
         }
 
-        $this->error('IVT Login failed: ' . $response->body());
+        $this->error('IVT Login failed: '.$response->body());
 
         return null;
     }
@@ -369,32 +435,32 @@ class BuildExcelIvtFile extends Command
     private function getRecipes(string $userToken, int $page, int $pageSize = 50): ?array
     {
         $response = Http::withHeaders([
-            'Accept'                      => 'application/json, text/plain, */*',
-            'language'                    => 'vi',
-            'device-type'                 => 'WEB',
-            'x-timezone'                  => '7',
-            'access-token'                => env('IVT_ACCESS_TOKEN', 'QEEWXV5B27K8YRG8XXZ83KA6LZQAZY6DRD91'),
-            'device-id'                   => env('IVT_DEVICE_ID', '8ee500c7-e317-4407-b5b7-094ac9a03896'),
-            'device-app-version'          => '2.14.3',
-            'device-os-platform'          => 'Microsoft Windows',
-            'device-os-browser'           => 'Chrome',
-            'device-os-version'           => '145.0.0.0',
-            'device-os-name'              => 'Windows 10.0',
-            'secret-key'                  => '713528fac3057e1a7945806cbb366183',
-            'user-token'                  => $userToken,
-            'Referer'                     => 'https://ivt.ipos.vn/',
+            'Accept' => 'application/json, text/plain, */*',
+            'language' => 'vi',
+            'device-type' => 'WEB',
+            'x-timezone' => '7',
+            'access-token' => env('IVT_ACCESS_TOKEN', 'QEEWXV5B27K8YRG8XXZ83KA6LZQAZY6DRD91'),
+            'device-id' => env('IVT_DEVICE_ID', '8ee500c7-e317-4407-b5b7-094ac9a03896'),
+            'device-app-version' => '2.14.3',
+            'device-os-platform' => 'Microsoft Windows',
+            'device-os-browser' => 'Chrome',
+            'device-os-version' => '145.0.0.0',
+            'device-os-name' => 'Windows 10.0',
+            'secret-key' => '713528fac3057e1a7945806cbb366183',
+            'user-token' => $userToken,
+            'Referer' => 'https://ivt.ipos.vn/',
             'Access-Control-Allow-Origin' => 'https://apiivt.ipos.vn',
         ])->get("{$this->baseUrl}/api/main/v2/catalog/recipe", [
-            'active'    => 1,
+            'active' => 1,
             'page_size' => $pageSize,
-            'page'      => $page,
+            'page' => $page,
         ]);
 
         if ($response->successful()) {
             return $response->json();
         }
 
-        $this->error("Recipes API error (page {$page}): " . $response->body());
+        $this->error("Recipes API error (page {$page}): ".$response->body());
 
         return null;
     }
@@ -410,11 +476,11 @@ class BuildExcelIvtFile extends Command
         }
 
         if (file_exists($filePath)) {
-            $reader = new \PhpOffice\PhpSpreadsheet\Reader\Xlsx();
+            $reader = new \PhpOffice\PhpSpreadsheet\Reader\Xlsx;
             $file = $reader->load($filePath);
             $sheet = $file->getActiveSheet();
         } else {
-            $file = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+            $file = new \PhpOffice\PhpSpreadsheet\Spreadsheet;
             $sheet = $file->getActiveSheet();
             $sheet->fromArray($headers, null, 'A1');
         }
@@ -422,7 +488,7 @@ class BuildExcelIvtFile extends Command
         $nextRow = $sheet->getHighestRow() + 1;
 
         foreach ($rows as $row) {
-            $sheet->fromArray($row, null, 'A' . $nextRow);
+            $sheet->fromArray($row, null, 'A'.$nextRow);
             $nextRow++;
         }
 
@@ -453,4 +519,3 @@ class BuildExcelIvtFile extends Command
         return str_replace('__NAM__', $year, $form);
     }
 }
-
