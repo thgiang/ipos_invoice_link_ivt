@@ -3,7 +3,7 @@
 namespace App\Console\Commands;
 
 use Illuminate\Console\Command;
-use App\Models\Invoice;
+use App\Models\Sale;
 use App\Models\StockOut;
 
 class FixStockout extends Command
@@ -27,17 +27,18 @@ class FixStockout extends Command
      */
     public function handle()
     {
-        // // Get all tran_id from invoice table, chunk by 100
-        $invoices = Invoice::chunk(100, function ($invoices) {
-            foreach ($invoices as $invoice) {
-                $tranId = $invoice->tran_id;
-                $stockOut = StockOut::where('tran_id', $tranId)->first();
+        // Re-sync has_sale and vat_invoice_number on all StockOuts from Sales table
+        Sale::chunk(1000, function ($sales) {
+            foreach ($sales as $sale) {
+                $stockOut = StockOut::where('tran_id', $sale->tran_id)->first();
                 if ($stockOut) {
-                    $stockOut->has_invoice = 1;
-                    $stockOut->vat_invoice_number = $invoice->vat_invoice_number;
+                    $stockOut->has_sale = 1;
+                    $stockOut->vat_invoice_number = $sale->vat_invoice_number;
                     $stockOut->save();
+                    $sale->stockout_id = $stockOut->id;
+                    $sale->save();
                 } else {
-                    echo "StockOut not found for tran_id: {$tranId}" . PHP_EOL;
+                    //echo "StockOut not found for tran_id: {$sale->tran_id}" . PHP_EOL;
                 }
             }
         });

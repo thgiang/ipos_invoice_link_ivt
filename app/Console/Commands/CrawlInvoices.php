@@ -60,7 +60,7 @@ class CrawlInvoices extends Command
             $this->newLine();
             $this->info("--- Store: {$storeName} ({$storeUid}) ---");
 
-            $page = 1;
+            $page = 104;
             $totalPages = 1;
 
             do {
@@ -83,6 +83,10 @@ class CrawlInvoices extends Command
                 $invoices = $response['data'] ?? [];
 
                 foreach ($invoices as $invoiceData) {
+                    if ($invoiceData['tran_id'] == "KBJR51M28PZ52MP92H5BS93F") {
+                        print_r($invoiceData);
+                    }
+
                     Invoice::updateOrCreate(
                         ['tran_id' => $invoiceData['tran_id']],
                         [

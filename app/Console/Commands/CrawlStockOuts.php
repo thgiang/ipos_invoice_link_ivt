@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Models\Sale;
 use App\Models\StockOut;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Http;
@@ -16,6 +17,12 @@ class CrawlStockOuts extends Command
 
     private string $baseUrl = 'https://apiivt.ipos.vn';
 
+    private const GI_TYPE_MAP = [
+        1 => 'XUAT_BAN_HANG',
+        4 => 'XUAT_HUY',
+        5 => 'XUAT_NV_DUNG',
+    ];
+
     public function handle(): int
     {
         $startDate = $this->option('start_date');
@@ -26,13 +33,12 @@ class CrawlStockOuts extends Command
             return self::FAILURE;
         }
 
-        // Convert to seconds timestamp (IVT API uses seconds, not milliseconds)
-        $startTimestamp = strtotime($startDate);
-        $endTimestamp = strtotime($endDate . ' 23:59:59');
+        // IVT API uses seconds timestamps
+        $startTimestamp = strtotime($startDate . ' 00:00:00');
+        $endTimestamp   = strtotime($endDate . ' 23:59:59');
 
         $this->info("=== Crawling stock-outs from {$startDate} to {$endDate} ===");
 
-        // Step 1: Login to IVT
         $this->info('Logging in to IVT...');
         $userToken = $this->loginIvt();
 
@@ -43,70 +49,107 @@ class CrawlStockOuts extends Command
 
         $this->info('Logged in successfully. Token obtained.');
 
-        // Step 2: Crawl stock-outs page by page
-        $page = 1;
-        $totalPages = 1;
         $totalProcessed = 0;
+
+        foreach (self::GI_TYPE_MAP as $giType => $loaiXuat) {
+            if ($giType == 1) {
+                continue;
+            }
+
+            $this->newLine();
+            $this->info("--- gi_type={$giType} ({$loaiXuat}) ---");
+
+            $processed = $this->crawlByGiType(
+                userToken:  $userToken,
+                fromDate:   $startTimestamp,
+                toDate:     $endTimestamp,
+                giType:     $giType,
+                loaiXuat:   $loaiXuat,
+            );
+
+            if ($processed === null) {
+                return self::FAILURE;
+            }
+
+            $totalProcessed += $processed;
+        }
+
+        $this->newLine();
+        $this->info("=== Done! Total stock-out records processed: {$totalProcessed} ===");
+
+        return self::SUCCESS;
+    }
+
+    /**
+     * Crawl all pages for a single gi_type. Returns total records processed, or null on fatal error.
+     */
+    private function crawlByGiType(
+        string $userToken,
+        int $fromDate,
+        int $toDate,
+        int $giType,
+        string $loaiXuat,
+    ): ?int {
+        $page       = 1;
+        $totalPages = 1;
+        $processed  = 0;
 
         do {
             $response = $this->getStockOuts(
                 userToken: $userToken,
-                fromDate: $startTimestamp,
-                toDate: $endTimestamp,
-                page: $page,
+                fromDate:  $fromDate,
+                toDate:    $toDate,
+                giType:    $giType,
+                page:      $page,
             );
 
             if (! $response) {
-                $this->warn("Failed to fetch page {$page}. Skipping...");
-                break;
+                $this->warn("  Failed to fetch page {$page}. Stopping for gi_type={$giType}.");
+                return null;
             }
 
             $totalPages = $response['total_pages'] ?? 1;
-            $items = $response['data'] ?? [];
+            $items      = $response['data'] ?? [];
 
             foreach ($items as $item) {
                 $tranId = $this->extractTranId($item['description'] ?? '');
-                // Check if $tranId is null
+
                 if (! $tranId) {
-                    $this->warn("Failed to extract tran_id from description: {$item['description']}");
-                    continue;
-                } else {
-                    // Find invoice by $tranId
-                    $invoice = Invoice::where('tran_id', $tranId)->first();
-                    if ($invoice) {
-                        $hasInvoice = 1;
-                    } else {
-                        $hasInvoice = 0;
-                    }
+                    $this->warn("  Failed to extract tran_id from description: {$item['description']}");
+                    //continue;
                 }
+
+                $sale               = Sale::where('tran_id', $tranId)->first();
+                $hasSale            = $sale ? 1 : 0;
+                $vatInvoiceNumber   = $sale?->vat_invoice_number;
 
                 StockOut::updateOrCreate(
                     ['gi_id' => $item['gi_id']],
                     [
-                        'gi_date'           => $item['gi_date'] ?? null,
-                        'gi_type'           => $item['gi_type'] ?? null,
-                        'status'            => $item['status'] ?? null,
-                        'gi_status'         => $item['gi_status'] ?? null,
-                        'gi_year'           => $item['gi_year'] ?? null,
-                        'description'       => $item['description'] ?? null,
-                        'final_amount'      => $item['final_amount'] ?? 0,
-                        'from_warehouse_id' => $item['from_warehouse_id'] ?? null,
-                        'ivt_id'            => $item['id'],
-                        'tran_id'           => $tranId,
-                        'has_invoice'       => $hasInvoice,
+                        'gi_date'            => $item['gi_date'] ?? null,
+                        'gi_type'            => $item['gi_type'] ?? null,
+                        'loai_xuat'          => $loaiXuat,
+                        'status'             => $item['status'] ?? null,
+                        'gi_status'          => $item['gi_status'] ?? null,
+                        'gi_year'            => $item['gi_year'] ?? null,
+                        'description'        => $item['description'] ?? null,
+                        'final_amount'       => $item['final_amount'] ?? 0,
+                        'from_warehouse_id'  => $item['from_warehouse_id'] ?? null,
+                        'ivt_id'             => $item['id'],
+                        'tran_id'            => $tranId,
+                        'has_sale'           => $hasSale,
+                        'vat_invoice_number' => $vatInvoiceNumber,
+                        'created_at' =>
                     ],
                 );
-                $totalProcessed++;
+                $processed++;
             }
 
             $this->line("  Page {$page}/{$totalPages} — " . count($items) . " record(s) processed.");
             $page++;
         } while ($page <= $totalPages);
 
-        $this->newLine();
-        $this->info("=== Done! Total stock-out records processed: {$totalProcessed} ===");
-
-        return self::SUCCESS;
+        return $processed;
     }
 
     /**
@@ -167,6 +210,7 @@ class CrawlStockOuts extends Command
         string $userToken,
         int $fromDate,
         int $toDate,
+        int $giType,
         int $page,
         int $pageSize = 100,
     ): ?array {
@@ -189,7 +233,7 @@ class CrawlStockOuts extends Command
         ])->get("{$this->baseUrl}/api/main/v3/service/stock-out", [
             'from_date'          => $fromDate,
             'to_date'            => $toDate,
-            'gi_type'            => 1,
+            'gi_type'            => $giType,
             'search'             => '',
             'financial_paper_id' => '',
             'from_warehouse_uid' => '',

@@ -10,6 +10,7 @@ class StockOut extends Model
         'gi_id',
         'gi_date',
         'gi_type',
+        'loai_xuat',
         'status',
         'gi_status',
         'gi_year',
@@ -18,7 +19,7 @@ class StockOut extends Model
         'from_warehouse_id',
         'ivt_id',
         'tran_id',
-        'has_invoice',
+        'has_sale',
         'detail',
     ];
 

@@ -2,7 +2,7 @@
 
 namespace App\Console\Commands;
 
-use App\Models\Invoice;
+use App\Models\Sale;
 use App\Models\StockOut;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Http;
@@ -26,6 +26,12 @@ class BuildExcelIvtFile extends Command
      * Format: [kyHieu][month][item_id] => ['item_name', 'quantity', 'unit_id', 'warehouse']
      */
     private array $monthlyAggregation = [];
+
+    /**
+     * Payment method aggregation data.
+     * Format: [kyHieu][month][payment_method_id] => ['sale_count', 'total_amount']
+     */
+    private array $paymentMethodAggregation = [];
 
     /**
      * Unit conversion table per item_id.
@@ -88,7 +94,7 @@ class BuildExcelIvtFile extends Command
         }
 
         // Step 3: Build Excel files per store per day
-        $stores = Invoice::select('store_uid')->groupBy('store_uid')->get();
+        $stores = Sale::select('store_uid')->groupBy('store_uid')->get();
 
         foreach ($period as $dt) {
             $date = $dt->format('Y-m-d');
@@ -126,6 +132,8 @@ class BuildExcelIvtFile extends Command
                         $data['quantity'],
                         $data['unit_id'],
                         $data['warehouse'],
+                        $data['total_amount'],
+                        $data['payment_method_id']
                     ];
                 }
 
@@ -139,8 +147,40 @@ class BuildExcelIvtFile extends Command
                     'quantity',
                     'unit_id',
                     'warehouse',
+                    'total_amount',
+                    'payment_method_id',
                 ], $rows);
                 $this->info("  Monthly summary generated: {$filePath}");
+            }
+        }
+
+        // Step 6: Write payment method aggregation Excel files
+        $this->info('Generating payment method summary Excel files...');
+        foreach ($this->paymentMethodAggregation as $kyHieu => $months) {
+            foreach ($months as $month => $methods) {
+                $filePath = storage_path("app/excel-ivt/{$kyHieu}_thanh_toan_{$month}.xlsx");
+
+                uasort($methods, fn ($a, $b) => $b['total_amount'] <=> $a['total_amount']);
+
+                $rows = [];
+                foreach ($methods as $methodId => $data) {
+                    $rows[] = [
+                        $kyHieu,
+                        $month,
+                        $methodId,
+                        $data['sale_count'],
+                        $data['total_amount'],
+                    ];
+                }
+
+                $this->writeToExcel($filePath, [
+                    'ky_hieu',
+                    'month',
+                    'payment_method_id',
+                    'sale_count',
+                    'total_amount',
+                ], $rows);
+                $this->info("  Payment method summary generated: {$filePath}");
             }
         }
 
@@ -159,6 +199,8 @@ class BuildExcelIvtFile extends Command
             'quantity',
             'unit_id',
             'warehouse',
+            'total_amount',
+            'payment_method_id',
         ];
 
         $startMs = strtotime($date.' 00:00:00') * 1000;
@@ -167,24 +209,36 @@ class BuildExcelIvtFile extends Command
         // Collect all rows grouped by filePath for this specific day
         $fileRows = [];
 
-        $dayInvoices = Invoice::where('store_uid', $storeUid)
+        $daySales = Sale::where('store_uid', $storeUid)
             ->whereBetween('vat_invoice_date', [$startMs, $endMs])
             ->orderBy('vat_invoice_number', 'asc')
             ->get();
 
-        if ($dayInvoices->isEmpty()) {
+        if ($daySales->isEmpty()) {
             return;
         }
 
-        $this->info("  Store {$storeUid}: found ".$dayInvoices->count().' invoices.');
+        $this->info("  Store {$storeUid}: found ".$daySales->count().' sale(s) with VAT invoices.');
 
-        $tranIds = $dayInvoices->pluck('tran_id');
+        $tranIds = $daySales->pluck('tran_id');
         $stockOuts = StockOut::whereIn('tran_id', $tranIds)->get()->keyBy('tran_id');
 
-        foreach ($dayInvoices as $invoice) {
+        foreach ($daySales as $invoice) {
             $stockOut = $stockOuts->get($invoice->tran_id);
             $kyHieu = $this->getKyHieu($invoice);
             $this->kyHieuInvoices[$kyHieu][] = $invoice->vat_invoice_number;
+
+            // Aggregate payment method data
+            $month = date('Y-m', strtotime($date));
+            $methodId = $invoice->payment_method_id ?? 'UNKNOWN';
+            if (! isset($this->paymentMethodAggregation[$kyHieu][$month][$methodId])) {
+                $this->paymentMethodAggregation[$kyHieu][$month][$methodId] = [
+                    'sale_count'   => 0,
+                    'total_amount' => 0.0,
+                ];
+            }
+            $this->paymentMethodAggregation[$kyHieu][$month][$methodId]['sale_count']++;
+            $this->paymentMethodAggregation[$kyHieu][$month][$methodId]['total_amount'] += (float) $invoice->total_amount;
 
             $filePath = storage_path(
                 'app/excel-ivt/'.$kyHieu.'/'.$date.'.xlsx'

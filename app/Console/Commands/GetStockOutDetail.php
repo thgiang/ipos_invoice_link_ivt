@@ -35,7 +35,7 @@ class GetStockOutDetail extends Command
         $totalProcessed = 0;
         $failed = false;
 
-        StockOut::where('has_invoice', 1)
+        StockOut::where('has_sale', 1)
             ->whereNull('detail')
             ->chunkById(100, function ($stockOuts) use (&$totalProcessed, &$failed) {
                 foreach ($stockOuts as $stockOut) {
