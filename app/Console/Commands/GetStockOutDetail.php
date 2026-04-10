@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Models\StockOut;
 use Illuminate\Console\Command;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 
 class GetStockOutDetail extends Command
@@ -43,34 +44,39 @@ class GetStockOutDetail extends Command
                         return false;
                     }
 
-                    $detail = $this->fetchDetail($stockOut->ivt_id);
-
-                    // If failed, retry once with a new token
-                    if ($detail === null) {
-                        $this->warn("Token may have expired. Retrying login...");
-                        $this->userToken = $this->loginIvt();
-
-                        if (! $this->userToken) {
-                            $this->error('IVT re-login failed! Stopping.');
-                            $failed = true;
-                            return false;
-                        }
-
-                        $this->info('Re-login successful. Retrying API call...');
+                    try {
                         $detail = $this->fetchDetail($stockOut->ivt_id);
 
+                        // If failed (non-exception), retry once with a new token
                         if ($detail === null) {
-                            $this->error("Failed to fetch detail for gi_id={$stockOut->gi_id} (ivt_id={$stockOut->ivt_id}) after retry. Stopping.");
-                            $failed = true;
-                            return false;
+                            $this->warn("Token may have expired. Retrying login...");
+                            $this->userToken = $this->loginIvt();
+
+                            if (! $this->userToken) {
+                                $this->error('IVT re-login failed! Stopping.');
+                                $failed = true;
+                                return false;
+                            }
+
+                            $this->info('Re-login successful. Retrying API call...');
+                            $detail = $this->fetchDetail($stockOut->ivt_id);
+
+                            if ($detail === null) {
+                                $this->error("Failed to fetch detail for gi_id={$stockOut->gi_id} (ivt_id={$stockOut->ivt_id}) after retry. Stopping.");
+                                $failed = true;
+                                return false;
+                            }
                         }
+
+                        $stockOut->detail = json_encode($detail);
+                        $stockOut->save();
+                        $totalProcessed++;
+
+                        $this->line("  ✓ {$stockOut->gi_id} — detail saved.");
+                    } catch (ConnectionException $e) {
+                        $this->warn("  ⚠ Skipping gi_id={$stockOut->gi_id} (ivt_id={$stockOut->ivt_id}): {$e->getMessage()}");
+                        continue;
                     }
-
-                    $stockOut->detail = json_encode($detail);
-                    $stockOut->save();
-                    $totalProcessed++;
-
-                    $this->line("  ✓ {$stockOut->gi_id} — detail saved.");
                 }
             });
 

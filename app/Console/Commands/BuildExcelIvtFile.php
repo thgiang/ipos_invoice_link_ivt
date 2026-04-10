@@ -108,6 +108,7 @@ class BuildExcelIvtFile extends Command
         // Step 4: Write kyHieu summary txt files
         $txtDir = storage_path('app/excel-ivt');
         foreach ($this->kyHieuInvoices as $kyHieu => $invoiceNumbers) {
+            $invoiceNumbers = array_values(array_filter($invoiceNumbers, fn ($n) => trim((string) $n) !== ''));
             sort($invoiceNumbers);
             $txtPath = $txtDir.'/Dem_hoa_don_thue_'.$kyHieu.'.txt';
             file_put_contents($txtPath, implode(PHP_EOL, $invoiceNumbers).PHP_EOL);
@@ -256,6 +257,8 @@ class BuildExcelIvtFile extends Command
                     0,
                     'ONG',
                     $kyHieu,
+                    $invoice->total_amount,
+                    $invoice->payment_method_id,
                 ];
 
                 continue;
@@ -278,6 +281,8 @@ class BuildExcelIvtFile extends Command
                         $nvl->quantity,
                         $nvl->unit_id,
                         $nvl->warehouse,
+                        $invoice->total_amount,
+                        $invoice->payment_method_id,
                     ];
 
                     // Aggregation per kyHieu and month (YYYY-MM)
@@ -288,6 +293,8 @@ class BuildExcelIvtFile extends Command
                             'quantity' => 0,
                             'unit_id' => $nvl->unit_id,
                             'warehouse' => $nvl->warehouse,
+                            'total_amount' => 0.0,
+                            'payment_method_id' => '',
                         ];
                     }
 
@@ -301,6 +308,7 @@ class BuildExcelIvtFile extends Command
                     }
 
                     $this->monthlyAggregation[$kyHieu][$month][$nvl->item_id]['quantity'] += $nvl->quantity;
+                    $this->monthlyAggregation[$kyHieu][$month][$nvl->item_id]['total_amount'] += (float) $invoice->total_amount;
                 }
             }
         }
