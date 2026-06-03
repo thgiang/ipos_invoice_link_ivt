@@ -49,6 +49,7 @@ class BuildExcelIvtFile extends Command
         'TP_THACHTRADAO' => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 70],
         'TP_THACHTHAIXANH' => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 70],
         'TP_SOTCARAMEL' => ['from' => 'PHAN', 'to' => 'GR', 'ratio' => 30],
+        'MANTOPPING' => ['from' => 'KG', 'to' => 'GR', 'ratio' => 1000],
     ];
 
     private array $overwriteWarehouse = [

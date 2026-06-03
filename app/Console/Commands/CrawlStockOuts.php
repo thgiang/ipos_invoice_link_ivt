@@ -52,9 +52,9 @@ class CrawlStockOuts extends Command
         $totalProcessed = 0;
 
         foreach (self::GI_TYPE_MAP as $giType => $loaiXuat) {
-            if ($giType == 1) {
-                continue;
-            }
+//            if ($giType == 1) {
+//                continue;
+//            }
 
             $this->newLine();
             $this->info("--- gi_type={$giType} ({$loaiXuat}) ---");
@@ -115,7 +115,7 @@ class CrawlStockOuts extends Command
                 $tranId = $this->extractTranId($item['description'] ?? '');
 
                 if (! $tranId) {
-                    $this->warn("  Failed to extract tran_id from description: {$item['description']}");
+                    $this->warn("  Failed to extract tran_id from description: {$item['description']} of {$item['id']}");
                     //continue;
                 }
 
@@ -139,7 +139,6 @@ class CrawlStockOuts extends Command
                         'tran_id'            => $tranId,
                         'has_sale'           => $hasSale,
                         'vat_invoice_number' => $vatInvoiceNumber,
-                        'created_at' =>
                     ],
                 );
                 $processed++;
