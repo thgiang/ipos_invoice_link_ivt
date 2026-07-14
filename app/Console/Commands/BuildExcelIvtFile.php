@@ -67,6 +67,8 @@ class BuildExcelIvtFile extends Command
         'KHUCBACHTANG' => 'BTRUNGLIET',
         'KHUCBACHCHANMEOTO' => 'BTRUNGLIET',
         'TP_SOTHATDE' => 'BTRUNGLIET',
+		'TP_KEMCOM' => 'BTRUNGLIET',
+		'TP_SOTCOM' => 'BTRUNGLIET',
     ];
 
     public function handle(): int
@@ -266,7 +268,13 @@ class BuildExcelIvtFile extends Command
             }
 
             foreach ($detail->list_item as $item) {
-                $nvls = $this->congThuc($item);
+				$nvls = $this->congThuc($item);
+				
+				//if ($item->item_id == "TP_SOTCOM") {
+				//print_r($nvls);
+				//exit();
+				//}
+                
 
                 foreach ($nvls as $nvl) {
                     if (empty($nvl->warehouse)) {
@@ -324,11 +332,20 @@ class BuildExcelIvtFile extends Command
      * Expand a composite item into its raw materials using its recipe.
      * If no recipe exists, returns the item as-is.
      *
+     * A material produced by a recipe may itself be a composite item with its
+     * own recipe (depth 2, 3, ...). In that case we keep expanding recursively
+     * until only raw materials (items without a recipe) remain.
+     *
+     * @param  string  $parentWarehouse  Warehouse inherited from the parent item;
+     *                                    used for sub-materials that have no
+     *                                    warehouse override of their own.
+     * @param  array<string>  $stack  item_ids on the current expansion path,
+     *                                 used to break recipe cycles.
      * @return object[]
      */
-    private function congThuc(object $item): array
+    private function congThuc(object $item, string $parentWarehouse = '', array $stack = []): array
     {
-        $item->warehouse = '';
+        $item->warehouse = $parentWarehouse;
         if (in_array($item->item_id, array_keys($this->overwriteWarehouse))) {
             $item->warehouse = $this->overwriteWarehouse[$item->item_id];
         }
@@ -339,6 +356,18 @@ class BuildExcelIvtFile extends Command
             // No recipe — this is already a raw material
             return [$item];
         }
+
+        // Guard against recipe cycles (e.g. A -> B -> A) which would recurse forever.
+        if (in_array($item->item_id, $stack, true)) {
+            $this->error(
+                'Recipe cycle detected for item_id='.$item->item_id.
+                ' (path: '.implode(' -> ', array_merge($stack, [$item->item_id])).'). '.
+                'Treating it as a raw material to stop recursion.'
+            );
+
+            return [$item];
+        }
+        $stack[] = $item->item_id;
 
         // Determine quantity multiplier
         // The recipe defines materials for 1 unit of recipe->unit_id
@@ -371,13 +400,21 @@ class BuildExcelIvtFile extends Command
         $materials = [];
 
         foreach ($recipe->recipe_details as $detail) {
-            $materials[] = (object) [
+            $material = (object) [
                 'item_id' => $detail->item_id,
                 'item_name' => $detail->item_name,
                 'unit_id' => $detail->unit_id,
                 'quantity' => round($detail->quantity * $itemQuantity, 4),
                 'warehouse' => $item->warehouse,
             ];
+
+            // A material can itself be a composite item (has its own recipe).
+            // Recurse so it is expanded down to raw materials as well.
+            // Sub-materials inherit this item's warehouse unless they define
+            // their own override inside congThuc().
+            foreach ($this->congThuc($material, $item->warehouse, $stack) as $expanded) {
+                $materials[] = $expanded;
+            }
         }
 
         // Echo Món ABC có công thức chế biến, đã quy đổi XXX unit_id thành các thành phần sau:

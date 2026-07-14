@@ -26,7 +26,7 @@ return new class extends Migration
             $table->string('tran_id')->nullable()->comment('Extracted from description (3rd segment split by _)')->index('IDX_TRAN_ID');
             $table->boolean('has_invoice')->default(0);
             $table->string('vat_invoice_number')->nullable()->comment('Vat invoice number from IVT API')->index('IDX_VAT_INVOICE_NUMBER');
-            $table->text('detail')->nullable()->comment('Reserved for future use');
+            $table->longText('detail')->nullable()->comment('Reserved for future use');
             $table->timestamps();
         });
     }
