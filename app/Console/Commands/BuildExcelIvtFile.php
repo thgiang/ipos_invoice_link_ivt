@@ -4,8 +4,8 @@ namespace App\Console\Commands;
 
 use App\Models\Sale;
 use App\Models\StockOut;
+use App\Services\IvtClient;
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\Http;
 
 class BuildExcelIvtFile extends Command
 {
@@ -13,10 +13,11 @@ class BuildExcelIvtFile extends Command
 
     protected $description = 'Build Excel IVT files from invoices and stock-outs by date range (YYYY-MM-DD)';
 
-    private string $baseUrl = 'https://apiivt.ipos.vn';
-
     /** @var array<string, object> Recipes keyed by item_id */
     private array $recipes = [];
+
+    /** @var array<string, true> Output paths already re-created during this run */
+    private array $touchedFiles = [];
 
     /** @var array<string, array<int>> Invoice numbers grouped by ky_hieu for summary TXT */
     private array $kyHieuInvoices = [];
@@ -67,9 +68,14 @@ class BuildExcelIvtFile extends Command
         'KHUCBACHTANG' => 'BTRUNGLIET',
         'KHUCBACHCHANMEOTO' => 'BTRUNGLIET',
         'TP_SOTHATDE' => 'BTRUNGLIET',
-		'TP_KEMCOM' => 'BTRUNGLIET',
-		'TP_SOTCOM' => 'BTRUNGLIET',
+        'TP_KEMCOM' => 'BTRUNGLIET',
+        'TP_SOTCOM' => 'BTRUNGLIET',
     ];
+
+    public function __construct(private readonly IvtClient $ivt)
+    {
+        parent::__construct();
+    }
 
     public function handle(): int
     {
@@ -137,7 +143,7 @@ class BuildExcelIvtFile extends Command
                         $data['unit_id'],
                         $data['warehouse'],
                         $data['total_amount'],
-                        $data['payment_method_id']
+                        $data['payment_method_id'],
                     ];
                 }
 
@@ -237,7 +243,7 @@ class BuildExcelIvtFile extends Command
             $methodId = $invoice->payment_method_id ?? 'UNKNOWN';
             if (! isset($this->paymentMethodAggregation[$kyHieu][$month][$methodId])) {
                 $this->paymentMethodAggregation[$kyHieu][$month][$methodId] = [
-                    'sale_count'   => 0,
+                    'sale_count' => 0,
                     'total_amount' => 0.0,
                 ];
             }
@@ -268,13 +274,7 @@ class BuildExcelIvtFile extends Command
             }
 
             foreach ($detail->list_item as $item) {
-				$nvls = $this->congThuc($item);
-				
-				//if ($item->item_id == "TP_SOTCOM") {
-				//print_r($nvls);
-				//exit();
-				//}
-                
+                $nvls = $this->congThuc($item);
 
                 foreach ($nvls as $nvl) {
                     if (empty($nvl->warehouse)) {
@@ -337,10 +337,10 @@ class BuildExcelIvtFile extends Command
      * until only raw materials (items without a recipe) remain.
      *
      * @param  string  $parentWarehouse  Warehouse inherited from the parent item;
-     *                                    used for sub-materials that have no
-     *                                    warehouse override of their own.
+     *                                   used for sub-materials that have no
+     *                                   warehouse override of their own.
      * @param  array<string>  $stack  item_ids on the current expansion path,
-     *                                 used to break recipe cycles.
+     *                                used to break recipe cycles.
      * @return object[]
      */
     private function congThuc(object $item, string $parentWarehouse = '', array $stack = []): array
@@ -449,10 +449,8 @@ class BuildExcelIvtFile extends Command
         }
 
         // Fetch from API
-        $userToken = $this->loginIvt();
-
-        if (! $userToken) {
-            $this->error('IVT login failed! Cannot load recipes.');
+        if (! $this->ivt->login()) {
+            $this->error('IVT login failed! Cannot load recipes. '.$this->ivt->lastError());
             exit(1);
         }
 
@@ -461,10 +459,10 @@ class BuildExcelIvtFile extends Command
         $totalPages = 1;
 
         do {
-            $response = $this->getRecipes($userToken, $page);
+            $response = $this->ivt->recipes($page);
 
             if (! $response) {
-                $this->error("Failed to fetch recipes page {$page}.");
+                $this->error("Failed to fetch recipes page {$page}: ".$this->ivt->lastError());
                 exit(1);
             }
 
@@ -500,73 +498,20 @@ class BuildExcelIvtFile extends Command
         return $recipes;
     }
 
-    private function loginIvt(): ?string
-    {
-        $response = Http::withHeaders([
-            'Content-Type' => 'application/json',
-            'Accept' => 'application/json, text/plain, */*',
-            'language' => 'vi',
-            'device-type' => 'WEB',
-            'x-timezone' => '7',
-            'access-token' => env('IVT_ACCESS_TOKEN', 'QEEWXV5B27K8YRG8XXZ83KA6LZQAZY6DRD91'),
-            'device-id' => env('IVT_DEVICE_ID', '8ee500c7-e317-4407-b5b7-094ac9a03896'),
-            'device-app-version' => '2.14.3',
-            'device-os-platform' => 'Microsoft Windows',
-            'device-os-browser' => 'Chrome',
-            'device-os-version' => '145.0.0.0',
-            'device-os-name' => 'Windows 10.0',
-            'secret-key' => '713528fac3057e1a7945806cbb366183',
-            'Referer' => 'https://ivt.ipos.vn/',
-            'Access-Control-Allow-Origin' => 'https://apiivt.ipos.vn',
-        ])->post("{$this->baseUrl}/api/main/v1/auth/login", [
-            'user_email' => env('IVT_EMAIL'),
-            'password' => env('IVT_PASSWORD'),
-        ]);
-
-        if ($response->successful()) {
-            return $response->json('data.user_token');
-        }
-
-        $this->error('IVT Login failed: '.$response->body());
-
-        return null;
-    }
-
-    private function getRecipes(string $userToken, int $page, int $pageSize = 50): ?array
-    {
-        $response = Http::withHeaders([
-            'Accept' => 'application/json, text/plain, */*',
-            'language' => 'vi',
-            'device-type' => 'WEB',
-            'x-timezone' => '7',
-            'access-token' => env('IVT_ACCESS_TOKEN', 'QEEWXV5B27K8YRG8XXZ83KA6LZQAZY6DRD91'),
-            'device-id' => env('IVT_DEVICE_ID', '8ee500c7-e317-4407-b5b7-094ac9a03896'),
-            'device-app-version' => '2.14.3',
-            'device-os-platform' => 'Microsoft Windows',
-            'device-os-browser' => 'Chrome',
-            'device-os-version' => '145.0.0.0',
-            'device-os-name' => 'Windows 10.0',
-            'secret-key' => '713528fac3057e1a7945806cbb366183',
-            'user-token' => $userToken,
-            'Referer' => 'https://ivt.ipos.vn/',
-            'Access-Control-Allow-Origin' => 'https://apiivt.ipos.vn',
-        ])->get("{$this->baseUrl}/api/main/v2/catalog/recipe", [
-            'active' => 1,
-            'page_size' => $pageSize,
-            'page' => $page,
-        ]);
-
-        if ($response->successful()) {
-            return $response->json();
-        }
-
-        $this->error("Recipes API error (page {$page}): ".$response->body());
-
-        return null;
-    }
-
     // ─── Excel Writing ─────────────────────────────────────────────
 
+    /**
+     * Append rows to an Excel file, creating it on first use.
+     *
+     * A single file is written to several times within one run — stores sharing
+     * a ky_hieu land in the same daily file — so appending is deliberate. What
+     * is not deliberate is appending to a file left behind by a *previous* run:
+     * that silently doubles every row when the same date range is rebuilt. So
+     * the first write of a run discards any existing file.
+     *
+     * @param  string[]  $headers
+     * @param  array<int, array<int, mixed>>  $rows
+     */
     private function writeToExcel(string $filePath, array $headers, array $rows): void
     {
         $dir = dirname($filePath);
@@ -574,6 +519,13 @@ class BuildExcelIvtFile extends Command
         if (! is_dir($dir)) {
             mkdir($dir, 0755, true);
         }
+
+        if (! isset($this->touchedFiles[$filePath]) && file_exists($filePath)) {
+            unlink($filePath);
+            $this->line("  Removed stale file from a previous run: {$filePath}");
+        }
+
+        $this->touchedFiles[$filePath] = true;
 
         if (file_exists($filePath)) {
             $reader = new \PhpOffice\PhpSpreadsheet\Reader\Xlsx;
